@@ -98,3 +98,39 @@ The simplest path is usually:
 1. Use this repo to develop the policy
 2. Port the final agent logic into the official Kaggle submission structure
 3. Keep the model-serving strategy local to the Kaggle runtime
+
+## Recommended 96GB Config
+
+For your `RTX PRO 6000 Blackwell 96GB`, the most practical single-GPU submission target is:
+
+- Model: `Qwen/Qwen2.5-72B-Instruct-AWQ`
+- Backend: `vLLM`
+- Analyzer backend in this repo: `direct`
+- OpenAI base URL inside the runtime: `http://127.0.0.1:8000/v1`
+
+Suggested starting server settings:
+
+```bash
+vllm serve /path/to/Qwen2.5-72B-Instruct-AWQ \
+  --served-model-name Qwen/Qwen2.5-72B-Instruct-AWQ \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --gpu-memory-utilization 0.92 \
+  --max-model-len 16384 \
+  --max-num-seqs 8 \
+  --tensor-parallel-size 1 \
+  --generation-config vllm \
+  --trust-remote-code
+```
+
+Why these defaults:
+
+- `AWQ` is supported by vLLM on Ada-class GPUs and newer
+- a 16k max context is much safer than trying to run the full model context in competition
+- `generation-config vllm` avoids unexpected sampling defaults from the model repo
+
+Relevant docs:
+
+- vLLM OpenAI server quickstart: https://docs.vllm.ai/en/latest/getting_started/quickstart/
+- vLLM quantization support: https://docs.vllm.ai/en/latest/features/quantization/
+- Qwen AWQ model card: https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-AWQ
