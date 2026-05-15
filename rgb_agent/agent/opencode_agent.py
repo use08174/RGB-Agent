@@ -27,6 +27,15 @@ log = logging.getLogger(__name__)
 _DOCKER_IMAGE = os.environ.get("OPENCODE_DOCKER_IMAGE", "rgb-agent/opencode-sandbox:latest")
 
 
+def _provider_config(provider: str) -> dict:
+    """Build provider config, including custom endpoints for local OpenAI-compatible servers."""
+    if provider == "openai":
+        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("RGB_OPENAI_BASE_URL")
+        if base_url:
+            return {"base_url": base_url, "baseURL": base_url}
+    return {}
+
+
 def _docker_image_exists(image: str) -> bool:
     try:
         result = subprocess.run(
@@ -188,7 +197,14 @@ class _ContainerPool:
         shutil.copy2(self._config_path, Path(sandbox) / "opencode.json")
 
         env_flags: list[str] = []
-        for key_name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"):
+        for key_name in (
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_BASE_URL",
+            "RGB_OPENAI_BASE_URL",
+        ):
             val = os.environ.get(key_name)
             if val:
                 env_flags.extend(["-e", f"{key_name}={val}"])
@@ -297,7 +313,7 @@ class OpenCodeAgent:
 
         config = {
             "model": self._oc_model,
-            "provider": {oc_provider: {}},
+            "provider": {oc_provider: _provider_config(oc_provider)},
             "permission": permission,
             "agent": {"build": {"steps": 50}},
         }

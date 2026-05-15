@@ -34,6 +34,7 @@ dev = [
 
 [project.scripts]
 rgb-swarm = "rgb_agent.environment.swarm:main"
+rgb-offline-eval = "rgb_agent.evaluation.offline_eval:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

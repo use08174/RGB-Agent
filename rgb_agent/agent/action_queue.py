@@ -13,7 +13,7 @@ class QueueExhausted(RuntimeError):
     pass
 
 
-_VALID_ACTIONS = {"ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION6", "RESET"}
+_VALID_ACTIONS = {"ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION6", "ACTION7", "RESET"}
 
 
 class ActionQueue:

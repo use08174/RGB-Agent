@@ -41,6 +41,20 @@ load_dotenv(dotenv_path=_project_root / ".env", override=True)
 ROOT_URL = os.environ.get("ROOT_URL", "https://three.arcprize.org")
 
 
+def _discover_local_games() -> list[str]:
+    env_root = Path(os.environ.get("ENVIRONMENTS_DIR", "environment_files"))
+    games: list[str] = []
+    for metadata_path in sorted(env_root.glob("*/*/metadata.json")):
+        try:
+            payload = json.loads(metadata_path.read_text())
+        except Exception:
+            continue
+        game_id = payload.get("game_id")
+        if game_id:
+            games.append(game_id)
+    return games
+
+
 class Swarm:
     """Manages a single scorecard and runs one agent per game in daemon threads."""
 
@@ -154,11 +168,20 @@ def main() -> None:
                         help="Analyzer model")
     parser.add_argument("--retries", dest="analyzer_retries", type=int, default=5,
                         help="Max analyzer retry attempts")
+    parser.add_argument(
+        "--analyzer-backend",
+        choices=["auto", "opencode", "direct"],
+        default=os.environ.get("ANALYZER_BACKEND", "auto"),
+        help="Analyzer backend: Docker/OpenCode or direct OpenAI-compatible API.",
+    )
 
     args = parser.parse_args()
+    offline_mode = args.operation_mode == "offline"
 
     # Resolve game list — support short names (e.g. "ls20" -> "ls20-cb3b57cc")
+    local_games = _discover_local_games()
     all_known = {gid for ids in EVALUATION_GAMES.values() for gid in ids}
+    all_known.update(local_games)
     prefix_map = {gid.split("-")[0]: gid for gid in all_known}
 
     games: list[str] = []
@@ -167,6 +190,9 @@ def main() -> None:
         games = [prefix_map.get(g, g) for g in raw]
     elif args.suite:
         games = EVALUATION_GAMES[args.suite]
+    elif offline_mode:
+        games = local_games
+        log.info("Offline mode: using %d locally bundled game(s)", len(games))
     else:
         api_key = os.getenv("ARC_API_KEY", "")
         try:
@@ -195,13 +221,19 @@ def main() -> None:
         operation_mode=OperationMode(args.operation_mode),
     )
 
-    from rgb_agent.agent import OpenCodeAgent
+    from rgb_agent.agent import create_analyzer
 
-    agent = OpenCodeAgent(
+    agent = create_analyzer(
         model=args.analyzer_model,
         plan_size=args.analyzer_interval,
+        backend=args.analyzer_backend,
     )
-    log.info("Analyzer enabled (interval=%d, model=%s)", args.analyzer_interval, args.analyzer_model)
+    log.info(
+        "Analyzer enabled (interval=%d, model=%s, backend=%s)",
+        args.analyzer_interval,
+        args.analyzer_model,
+        args.analyzer_backend,
+    )
 
     timestamp = datetime.now().strftime("%m%dT%H%M%S")
     run_dir = Path("evaluation_results") / f"{timestamp}_swarm_{args.agent}"
