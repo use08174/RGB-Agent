@@ -37,6 +37,13 @@ Your response MUST contain ALL sections below in this exact order:
 
 [PLAN]
 <concise action plan the agent should follow until the next analysis>
+
+3. Followed by exactly this separator and a single valid JSON object:
+
+[ACTIONS]
+{"plan": [{"action": "ACTION1"}, {"action": "ACTION6", "x": 3, "y": 7}], "reasoning": "why these steps"}
+
+Do not omit [ACTIONS]. Do not wrap the JSON in Markdown fences. Do not output any extra sections after [ACTIONS].
 """
 
 
@@ -109,6 +116,7 @@ class DirectAnalyzerAgent:
         )
 
         response_text = self._call_model(prompt)
+        response_text = self._normalize_response(response_text)
         self._write_analyzer_log(analyzer_log, action_num, prompt, response_text)
 
         if not response_text:
@@ -119,6 +127,34 @@ class DirectAnalyzerAgent:
                 self._sessions[path_key] = _SessionState(previous_response=response_text)
 
         return response_text
+
+    def _normalize_response(self, response_text: str | None) -> str | None:
+        """Best-effort repair so downstream code sees [PLAN] and [ACTIONS]."""
+        if not response_text:
+            return None
+
+        text = response_text.replace("\r\n", "\n").strip()
+        if "\n[ACTIONS]\n" in text and "\n[PLAN]\n" in text:
+            return text
+
+        actions_payload = self._extract_actions_payload(text)
+        if not actions_payload:
+            return text
+
+        plan_text = self._extract_plan_text(text)
+
+        briefing = text
+        if "\n[PLAN]\n" in briefing:
+            briefing = briefing.split("\n[PLAN]\n", 1)[0].strip()
+        elif "\n[ACTIONS]\n" in briefing:
+            briefing = briefing.split("\n[ACTIONS]\n", 1)[0].strip()
+
+        rebuilt = (
+            f"{briefing}\n\n"
+            f"[PLAN]\n{plan_text}\n\n"
+            f"[ACTIONS]\n{json.dumps(actions_payload, ensure_ascii=False, indent=2)}"
+        )
+        return rebuilt.strip()
 
     def _build_prompt(
         self,
@@ -173,6 +209,52 @@ class DirectAnalyzerAgent:
             parts.append("[LOG TAIL]\n" + tail)
         return "\n\n".join(parts)
 
+    def _extract_plan_text(self, text: str) -> str:
+        match = re.search(r"\[PLAN\]\s*(.*?)(?:\n\s*\[[A-Z]+\]|\Z)", text, re.S)
+        if match:
+            plan = match.group(1).strip()
+            if plan:
+                return plan
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return " ".join(lines[-2:])[:400]
+        return "Execute the proposed short batch, then re-evaluate based on board changes and score transitions."
+
+    def _extract_actions_payload(self, text: str) -> dict | None:
+        for candidate in reversed(list(self._iter_json_candidates(text))):
+            if not self._looks_like_action_payload(candidate):
+                continue
+            if isinstance(candidate, list):
+                return {"plan": candidate, "reasoning": ""}
+            plan = candidate.get("plan", candidate.get("actions"))
+            if isinstance(plan, list) and plan:
+                return {
+                    "plan": plan,
+                    "reasoning": str(candidate.get("reasoning", "")),
+                }
+        return None
+
+    def _iter_json_candidates(self, text: str):
+        clean = re.sub(r"```(?:json)?\s*", "", text).replace("```", "")
+        decoder = json.JSONDecoder()
+        for idx, char in enumerate(clean):
+            if char not in "{[":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(clean, idx)
+            except json.JSONDecodeError:
+                continue
+            yield parsed
+
+    def _looks_like_action_payload(self, candidate: object) -> bool:
+        if isinstance(candidate, list):
+            return bool(candidate)
+        if not isinstance(candidate, dict):
+            return False
+        plan = candidate.get("plan", candidate.get("actions"))
+        return isinstance(plan, list) and bool(plan)
+
     def _extract_score_summary(self, log_text: str) -> str:
         action_headers = re.findall(r"Action (\d+) \| Level (\d+) \| Attempt (\d+)", log_text)
         score_lines = re.findall(r"Score: (\d+) \| State: ([A-Z_]+)", log_text)
@@ -225,10 +307,10 @@ class DirectAnalyzerAgent:
         payload = {
             "model": self._model_name,
             "messages": [
-                {"role": "system", "content": "Return plain text only."},
+                {"role": "system", "content": "Return plain text only. You must include [PLAN] and [ACTIONS]."},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
+            "temperature": 0.0,
         }
 
         headers = {

@@ -43,6 +43,7 @@ ACTIONS_ADDENDUM = """
 
 Available actions: ACTION1-5, ACTION7 (simple actions whose meaning varies by game), ACTION6 (complex action with x,y), RESET.
 Each action MUST be a JSON object: {{"action": "ACTION6", "x": <row>, "y": <col>}} for clicks, {{"action": "ACTION1"}} for simple actions. Never use string shorthand like "ACTION6(x,y)".
+Do not wrap the JSON in Markdown fences. Do not put prose after the [ACTIONS] block. The final block of your response must be [ACTIONS] followed by one valid JSON object.
 Plan 1–{plan_size} actions. IMPORTANT: shorter plans (3-5 steps) are strongly preferred
 because the agent can re-evaluate sooner. Only use more than 5 if you have very high
 confidence AND the extra steps are critical. Even on a clear straight path, prefer

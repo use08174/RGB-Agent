@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -25,6 +26,28 @@ _RETRY_NUDGE = (
     "You MUST end your response with an [ACTIONS] section containing a JSON action plan. "
     "Do NOT write actions to a file — output them directly in your response text."
 )
+
+
+def _extract_inline_actions_payload(text: str) -> str | None:
+    """Recover an action plan from inline JSON even if the [ACTIONS] header is missing."""
+    clean = re.sub(r"```(?:json)?\s*", "", text).replace("```", "").strip()
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(clean):
+        if char not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(clean, idx)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed, list) and parsed:
+            return json.dumps({"plan": parsed, "reasoning": ""}, ensure_ascii=False, indent=2)
+        if isinstance(parsed, dict):
+            plan = parsed.get("plan", parsed.get("actions"))
+            if isinstance(plan, list) and plan:
+                payload = {"plan": plan, "reasoning": str(parsed.get("reasoning", ""))}
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+    return None
 
 
 def _run_with_retries(func: Callable, *args: Any, **kwargs: Any) -> Any:
@@ -323,6 +346,8 @@ class GameRunner:
         if "\n[ACTIONS]\n" in hint:
             hint, actions_text = hint.split("\n[ACTIONS]\n", 1)
             actions_text = actions_text.strip()
+        else:
+            actions_text = _extract_inline_actions_payload(hint)
 
         if "\n[PLAN]\n" in hint:
             full_hint, plan = hint.split("\n[PLAN]\n", 1)
