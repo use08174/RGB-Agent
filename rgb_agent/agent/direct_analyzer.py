@@ -47,6 +47,26 @@ Your response MUST contain ALL sections below in this exact order:
 Do not omit [ACTIONS]. Do not wrap the JSON in Markdown fences. Do not output any extra sections after [ACTIONS].
 """
 
+_JSON_RECOVERY_PROMPT = """\
+Your previous reply did not follow the required output format.
+
+Return ONLY one valid JSON object with exactly these keys:
+- "briefing": string
+- "plan": string
+- "actions": array of action objects
+- "reasoning": string
+
+Rules:
+- No Markdown fences
+- No prose before or after the JSON
+- "actions" must be a non-empty array
+- Each action object must have an "action" key
+- For ACTION6 include integer "x" and "y"
+
+Example:
+{"briefing":"...", "plan":"...", "actions":[{"action":"ACTION1"},{"action":"ACTION6","x":3,"y":7}], "reasoning":"..."}
+"""
+
 
 @dataclass
 class _SessionState:
@@ -123,8 +143,21 @@ class DirectAnalyzerAgent:
             prompt_used = prompt
             response_text, last_error = self._call_model(prompt)
             response_text = self._normalize_response(response_text)
-            if response_text:
+            if response_text and self._extract_actions_payload(response_text):
                 break
+
+            recovery_prompt = self._build_json_recovery_prompt(prompt, response_text or "")
+            recovery_text, recovery_error = self._call_model(recovery_prompt)
+            recovered = self._normalize_recovery_json(recovery_text or "")
+            if recovered:
+                response_text = recovered
+                last_error = ""
+                break
+            if recovery_error:
+                last_error = recovery_error
+
+            if response_text:
+                response_text = None
             log.warning("direct analyzer returned no usable response at scale=%.2f", scale)
 
         self._write_analyzer_log(analyzer_log, action_num, prompt_used, response_text, last_error=last_error)
@@ -166,6 +199,27 @@ class DirectAnalyzerAgent:
         )
         return rebuilt.strip()
 
+    def _normalize_recovery_json(self, response_text: str) -> str | None:
+        for candidate in reversed(list(self._iter_json_candidates(response_text))):
+            if not isinstance(candidate, dict):
+                continue
+            actions = candidate.get("actions", candidate.get("plan"))
+            if not isinstance(actions, list) or not actions:
+                continue
+
+            briefing = str(candidate.get("briefing", "")).strip() or "Recovered analyzer response."
+            plan = candidate.get("plan", "")
+            if not isinstance(plan, str) or not plan.strip():
+                plan = "Execute the recovered short batch, then re-evaluate based on board changes and score transitions."
+            reasoning = str(candidate.get("reasoning", ""))
+            payload = {"plan": actions, "reasoning": reasoning}
+            return (
+                f"{briefing}\n\n"
+                f"[PLAN]\n{plan}\n\n"
+                f"[ACTIONS]\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+            ).strip()
+        return None
+
     def _build_prompt(
         self,
         *,
@@ -186,6 +240,17 @@ class DirectAnalyzerAgent:
             parts.append(retry_nudge.strip())
 
         return "\n\n".join(part for part in parts if part.strip())
+
+    def _build_json_recovery_prompt(self, original_prompt: str, previous_response: str) -> str:
+        clipped_prompt = original_prompt[-6000:]
+        clipped_response = previous_response[-3000:] if previous_response else ""
+        parts = [
+            _JSON_RECOVERY_PROMPT,
+            "[ORIGINAL REQUEST]\n" + clipped_prompt,
+        ]
+        if clipped_response:
+            parts.append("[PREVIOUS RESPONSE]\n" + clipped_response)
+        return "\n\n".join(parts)
 
     def _build_instructions(self, is_first: bool) -> str:
         if is_first:
