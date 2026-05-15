@@ -163,6 +163,7 @@ def run_offline_evaluation(
     analyzer_model: str = "claude-opus-4-6",
     analyzer_backend: str = "auto",
     analyzer_retries: int = 5,
+    parallel_games: int | None = None,
     description: str | None = None,
     output_root: str | Path = "evaluation_results",
     environments_dir: str | Path | None = None,
@@ -196,6 +197,8 @@ def run_offline_evaluation(
         plan_size=analyzer_interval,
         backend=analyzer_backend,
     )
+    if parallel_games is None and analyzer_backend == "transformers":
+        parallel_games = 1
 
     swarm = Swarm(
         inner_agent_kwargs={"name": agent_name, "plan_size": analyzer_interval},
@@ -207,6 +210,7 @@ def run_offline_evaluation(
         prompts_log_dir=run_dir,
         log_post_board=True,
         analyzer_retries=analyzer_retries,
+        max_parallel_games=parallel_games,
     )
     results = swarm.run()
     results_list = list(results.values())
@@ -253,6 +257,7 @@ def run_offline_evaluation(
         "analyzer_backend": analyzer_backend,
         "analyzer_retries": analyzer_retries,
         "description": description,
+        "parallel_games": parallel_games or len(games),
         "operation_mode": "offline",
         "environments_dir": str(env_root),
         "run_dir": str(run_dir),
@@ -280,6 +285,7 @@ def main() -> None:
     parser.add_argument("--model", "-m", dest="analyzer_model", default="claude-opus-4-6")
     parser.add_argument("--analyzer-backend", choices=["auto", "opencode", "direct", "transformers"], default=os.environ.get("ANALYZER_BACKEND", "auto"))
     parser.add_argument("--retries", dest="analyzer_retries", type=int, default=5)
+    parser.add_argument("--parallel-games", type=int, default=None)
     parser.add_argument("--description")
     parser.add_argument("--output-root", default="evaluation_results")
     parser.add_argument("--environments-dir")
@@ -294,6 +300,7 @@ def main() -> None:
         analyzer_model=args.analyzer_model,
         analyzer_backend=args.analyzer_backend,
         analyzer_retries=args.analyzer_retries,
+        parallel_games=args.parallel_games,
         description=args.description,
         output_root=args.output_root,
         environments_dir=args.environments_dir,

@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -69,6 +70,7 @@ class Swarm:
         prompts_log_dir: Path | None = None,
         log_post_board: bool = True,
         analyzer_retries: int = 5,
+        max_parallel_games: int | None = None,
     ) -> None:
         self.inner_agent_kwargs = inner_agent_kwargs
         self._arcade = arcade
@@ -79,6 +81,7 @@ class Swarm:
         self.prompts_log_dir = prompts_log_dir
         self.log_post_board = log_post_board
         self.analyzer_retries = analyzer_retries
+        self.max_parallel_games = max(1, max_parallel_games or len(games) or 1)
 
         self.card_id: str | None = None
         self.scorecard: Any = None
@@ -88,15 +91,19 @@ class Swarm:
     def run(self) -> dict[str, GameMetrics]:
         self.card_id = self._arcade.open_scorecard(tags=self.tags)
         log.info("Opened scorecard %s for %d game(s)", self.card_id, len(self.games))
+        log.info("Running up to %d game(s) in parallel", self.max_parallel_games)
 
-        threads = [
-            threading.Thread(target=self._run_game, args=(self.card_id, gid), daemon=True)
-            for gid in self.games
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        if self.max_parallel_games == 1:
+            for game_id in self.games:
+                self._run_game(self.card_id, game_id)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel_games) as executor:
+                futures = [
+                    executor.submit(self._run_game, self.card_id, game_id)
+                    for game_id in self.games
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
 
         self.scorecard = self._arcade.close_scorecard(self.card_id)
         log.info("Closed scorecard %s", self.card_id)
@@ -169,6 +176,12 @@ def main() -> None:
     parser.add_argument("--retries", dest="analyzer_retries", type=int, default=5,
                         help="Max analyzer retry attempts")
     parser.add_argument(
+        "--parallel-games",
+        type=int,
+        default=None,
+        help="Maximum number of games to run in parallel. Defaults to all, or 1 for transformers backend.",
+    )
+    parser.add_argument(
         "--analyzer-backend",
         choices=["auto", "opencode", "direct", "transformers"],
         default=os.environ.get("ANALYZER_BACKEND", "auto"),
@@ -228,11 +241,15 @@ def main() -> None:
         plan_size=args.analyzer_interval,
         backend=args.analyzer_backend,
     )
+    max_parallel_games = args.parallel_games
+    if max_parallel_games is None and args.analyzer_backend == "transformers":
+        max_parallel_games = 1
     log.info(
-        "Analyzer enabled (interval=%d, model=%s, backend=%s)",
+        "Analyzer enabled (interval=%d, model=%s, backend=%s, parallel_games=%s)",
         args.analyzer_interval,
         args.analyzer_model,
         args.analyzer_backend,
+        max_parallel_games or len(games),
     )
 
     timestamp = datetime.now().strftime("%m%dT%H%M%S")
@@ -252,6 +269,7 @@ def main() -> None:
         prompts_log_dir=run_dir,
         log_post_board=True,
         analyzer_retries=args.analyzer_retries,
+        max_parallel_games=max_parallel_games,
     )
 
     runner = threading.Thread(target=swarm.run, daemon=True)

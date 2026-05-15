@@ -54,6 +54,8 @@ class LocalTransformersAnalyzerAgent:
         self._resume_session = resume_session
         self._sessions: dict[str, _SessionState] = {}
         self._lock = Lock()
+        self._model_lock = Lock()
+        self._inference_lock = Lock()
         self._model = None
         self._tokenizer = None
         self._torch = None
@@ -71,48 +73,51 @@ class LocalTransformersAnalyzerAgent:
     def _ensure_model(self) -> None:
         if self._model is not None and self._tokenizer is not None and self._torch is not None:
             return
+        with self._model_lock:
+            if self._model is not None and self._tokenizer is not None and self._torch is not None:
+                return
 
-        import torch
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+            import torch
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-        self._torch = torch
-        self._tokenizer = AutoTokenizer.from_pretrained(self._model_ref, trust_remote_code=True)
-        config = AutoConfig.from_pretrained(self._model_ref, trust_remote_code=True)
+            self._torch = torch
+            self._tokenizer = AutoTokenizer.from_pretrained(self._model_ref, trust_remote_code=True)
+            config = AutoConfig.from_pretrained(self._model_ref, trust_remote_code=True)
 
-        load_in_4bit = os.environ.get("TRANSFORMERS_LOAD_IN_4BIT", "1") == "1"
-        model_kwargs = {
-            "trust_remote_code": True,
-            "device_map": "auto",
-        }
+            load_in_4bit = os.environ.get("TRANSFORMERS_LOAD_IN_4BIT", "1") == "1"
+            model_kwargs = {
+                "trust_remote_code": True,
+                "device_map": "auto",
+            }
 
-        dtype_name = os.environ.get("TRANSFORMERS_TORCH_DTYPE", "bfloat16")
-        if dtype_name == "float16":
-            model_kwargs["torch_dtype"] = torch.float16
-        else:
-            model_kwargs["torch_dtype"] = torch.bfloat16
+            dtype_name = os.environ.get("TRANSFORMERS_TORCH_DTYPE", "bfloat16")
+            if dtype_name == "float16":
+                model_kwargs["torch_dtype"] = torch.float16
+            else:
+                model_kwargs["torch_dtype"] = torch.bfloat16
 
-        model_quant_config = getattr(config, "quantization_config", None)
-        has_embedded_quant = model_quant_config is not None
+            model_quant_config = getattr(config, "quantization_config", None)
+            has_embedded_quant = model_quant_config is not None
 
-        if load_in_4bit and not has_embedded_quant:
-            from transformers import BitsAndBytesConfig
+            if load_in_4bit and not has_embedded_quant:
+                from transformers import BitsAndBytesConfig
 
-            model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type=os.environ.get("TRANSFORMERS_4BIT_QUANT", "nf4"),
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=model_kwargs["torch_dtype"],
-            )
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type=os.environ.get("TRANSFORMERS_4BIT_QUANT", "nf4"),
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=model_kwargs["torch_dtype"],
+                )
 
-        if has_embedded_quant:
-            log.info(
-                "Model %s already provides quantization_config=%s; skipping BitsAndBytesConfig override.",
-                self._model_ref,
-                type(model_quant_config).__name__,
-            )
+            if has_embedded_quant:
+                log.info(
+                    "Model %s already provides quantization_config=%s; skipping BitsAndBytesConfig override.",
+                    self._model_ref,
+                    type(model_quant_config).__name__,
+                )
 
-        self._model = AutoModelForCausalLM.from_pretrained(self._model_ref, **model_kwargs)
-        self._model.eval()
+            self._model = AutoModelForCausalLM.from_pretrained(self._model_ref, **model_kwargs)
+            self._model.eval()
 
     def analyze(self, log_path: Path, action_num: int, retry_nudge: str = "") -> Optional[str]:
         if not log_path.exists():
@@ -228,16 +233,17 @@ class LocalTransformersAnalyzerAgent:
                 f"User: {prompt}\n\nAssistant:"
             )
 
-        inputs = self._tokenizer(rendered, return_tensors="pt")
-        inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+        with self._inference_lock:
+            inputs = self._tokenizer(rendered, return_tensors="pt")
+            inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
 
-        with self._torch.no_grad():
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=_DEFAULT_MAX_NEW_TOKENS,
-                do_sample=False,
-                pad_token_id=self._tokenizer.eos_token_id,
-            )
+            with self._torch.no_grad():
+                outputs = self._model.generate(
+                    **inputs,
+                    max_new_tokens=_DEFAULT_MAX_NEW_TOKENS,
+                    do_sample=False,
+                    pad_token_id=self._tokenizer.eos_token_id,
+                )
 
         generated = outputs[0][inputs["input_ids"].shape[1]:]
         return self._tokenizer.decode(generated, skip_special_tokens=True).strip()
