@@ -73,10 +73,11 @@ class LocalTransformersAnalyzerAgent:
             return
 
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
         self._torch = torch
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_ref, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(self._model_ref, trust_remote_code=True)
 
         load_in_4bit = os.environ.get("TRANSFORMERS_LOAD_IN_4BIT", "1") == "1"
         model_kwargs = {
@@ -90,7 +91,10 @@ class LocalTransformersAnalyzerAgent:
         else:
             model_kwargs["torch_dtype"] = torch.bfloat16
 
-        if load_in_4bit:
+        model_quant_config = getattr(config, "quantization_config", None)
+        has_embedded_quant = model_quant_config is not None
+
+        if load_in_4bit and not has_embedded_quant:
             from transformers import BitsAndBytesConfig
 
             model_kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -98,6 +102,13 @@ class LocalTransformersAnalyzerAgent:
                 bnb_4bit_quant_type=os.environ.get("TRANSFORMERS_4BIT_QUANT", "nf4"),
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=model_kwargs["torch_dtype"],
+            )
+
+        if has_embedded_quant:
+            log.info(
+                "Model %s already provides quantization_config=%s; skipping BitsAndBytesConfig override.",
+                self._model_ref,
+                type(model_quant_config).__name__,
             )
 
         self._model = AutoModelForCausalLM.from_pretrained(self._model_ref, **model_kwargs)
