@@ -278,7 +278,7 @@ def main() -> None:
     parser.add_argument("--max-actions", type=int, default=500)
     parser.add_argument("--interval", "-n", dest="analyzer_interval", type=int, default=10)
     parser.add_argument("--model", "-m", dest="analyzer_model", default="claude-opus-4-6")
-    parser.add_argument("--analyzer-backend", choices=["auto", "opencode", "direct"], default=os.environ.get("ANALYZER_BACKEND", "auto"))
+    parser.add_argument("--analyzer-backend", choices=["auto", "opencode", "direct", "transformers"], default=os.environ.get("ANALYZER_BACKEND", "auto"))
     parser.add_argument("--retries", dest="analyzer_retries", type=int, default=5)
     parser.add_argument("--description")
     parser.add_argument("--output-root", default="evaluation_results")

@@ -170,7 +170,7 @@ def main() -> None:
                         help="Max analyzer retry attempts")
     parser.add_argument(
         "--analyzer-backend",
-        choices=["auto", "opencode", "direct"],
+        choices=["auto", "opencode", "direct", "transformers"],
         default=os.environ.get("ANALYZER_BACKEND", "auto"),
         help="Analyzer backend: Docker/OpenCode or direct OpenAI-compatible API.",
     )

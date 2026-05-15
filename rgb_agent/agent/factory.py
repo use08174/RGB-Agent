@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from rgb_agent.agent.direct_analyzer import DirectAnalyzerAgent
+from rgb_agent.agent.local_transformers_analyzer import LocalTransformersAnalyzerAgent
 from rgb_agent.agent.opencode_agent import OpenCodeAgent
 
 
@@ -24,6 +25,13 @@ def create_analyzer(
     timeout: int | None = None,
     resume_session: bool = True,
 ) -> Any:
+    if backend == "transformers":
+        return LocalTransformersAnalyzerAgent(
+            model=model,
+            plan_size=plan_size,
+            timeout=timeout,
+            resume_session=resume_session,
+        )
     if backend == "direct":
         return DirectAnalyzerAgent(
             model=model,
