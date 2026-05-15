@@ -18,9 +18,10 @@ from rgb_agent.agent.prompts import ACTIONS_ADDENDUM
 log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = int(os.environ.get("ANALYZER_TIMEOUT_SECONDS", "180"))
-_DEFAULT_MAX_HEAD_CHARS = int(os.environ.get("ANALYZER_HEAD_CHARS", "12000"))
-_DEFAULT_MAX_TAIL_CHARS = int(os.environ.get("ANALYZER_TAIL_CHARS", "42000"))
-_DEFAULT_RECENT_BLOCKS = int(os.environ.get("ANALYZER_RECENT_BLOCKS", "40"))
+_DEFAULT_MAX_HEAD_CHARS = int(os.environ.get("ANALYZER_HEAD_CHARS", "4000"))
+_DEFAULT_MAX_TAIL_CHARS = int(os.environ.get("ANALYZER_TAIL_CHARS", "12000"))
+_DEFAULT_RECENT_BLOCKS = int(os.environ.get("ANALYZER_RECENT_BLOCKS", "16"))
+_DEFAULT_MAX_OUTPUT_TOKENS = int(os.environ.get("ANALYZER_MAX_OUTPUT_TOKENS", "1200"))
 
 _SYSTEM_PROMPT = """\
 You are the analyzer for an AI agent playing a grid-based puzzle game.
@@ -108,16 +109,25 @@ class DirectAnalyzerAgent:
         with self._lock:
             previous = self._sessions.get(path_key, _SessionState()).previous_response
 
-        prompt = self._build_prompt(
-            log_text=log_text,
-            is_first=not bool(previous),
-            previous_response=previous,
-            retry_nudge=retry_nudge,
-        )
+        response_text = None
+        prompt_used = ""
+        last_error = ""
+        for scale in (1.0, 0.5, 0.25):
+            prompt = self._build_prompt(
+                log_text=log_text,
+                is_first=not bool(previous),
+                previous_response=previous if scale == 1.0 else "",
+                retry_nudge=retry_nudge,
+                scale=scale,
+            )
+            prompt_used = prompt
+            response_text, last_error = self._call_model(prompt)
+            response_text = self._normalize_response(response_text)
+            if response_text:
+                break
+            log.warning("direct analyzer returned no usable response at scale=%.2f", scale)
 
-        response_text = self._call_model(prompt)
-        response_text = self._normalize_response(response_text)
-        self._write_analyzer_log(analyzer_log, action_num, prompt, response_text)
+        self._write_analyzer_log(analyzer_log, action_num, prompt_used, response_text, last_error=last_error)
 
         if not response_text:
             return None
@@ -163,8 +173,9 @@ class DirectAnalyzerAgent:
         is_first: bool,
         previous_response: str,
         retry_nudge: str,
+        scale: float = 1.0,
     ) -> str:
-        summary = self._build_log_summary(log_text)
+        summary = self._build_log_summary(log_text, scale=scale)
         instructions = self._build_instructions(is_first)
         parts = [instructions, summary, ACTIONS_ADDENDUM.format(plan_size=self._plan_size)]
 
@@ -185,13 +196,17 @@ class DirectAnalyzerAgent:
             + "\nFocus on score transitions, board deltas, and whether the recent actions helped."
         )
 
-    def _build_log_summary(self, log_text: str) -> str:
+    def _build_log_summary(self, log_text: str, *, scale: float = 1.0) -> str:
+        head_chars = max(1000, int(_DEFAULT_MAX_HEAD_CHARS * scale))
+        tail_chars = max(4000, int(_DEFAULT_MAX_TAIL_CHARS * scale))
+        recent_blocks_n = max(4, int(_DEFAULT_RECENT_BLOCKS * scale))
+
         latest_board = self._extract_latest_board(log_text)
         previous_board = self._extract_previous_board(log_text)
-        recent_blocks = self._extract_recent_action_blocks(log_text, _DEFAULT_RECENT_BLOCKS)
+        recent_blocks = self._extract_recent_action_blocks(log_text, recent_blocks_n)
         score_summary = self._extract_score_summary(log_text)
-        head = log_text[:_DEFAULT_MAX_HEAD_CHARS].strip()
-        tail = log_text[-_DEFAULT_MAX_TAIL_CHARS:].strip()
+        head = log_text[:head_chars].strip()
+        tail = log_text[-tail_chars:].strip()
 
         parts = [
             "[RUN SUMMARY]",
@@ -303,7 +318,7 @@ class DirectAnalyzerAgent:
             board_lines.append(line)
         return "\n".join(board_lines).strip()
 
-    def _call_model(self, prompt: str) -> Optional[str]:
+    def _call_model(self, prompt: str) -> tuple[Optional[str], str]:
         payload = {
             "model": self._model_name,
             "messages": [
@@ -311,6 +326,7 @@ class DirectAnalyzerAgent:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.0,
+            "max_tokens": _DEFAULT_MAX_OUTPUT_TOKENS,
         }
 
         headers = {
@@ -331,21 +347,37 @@ class DirectAnalyzerAgent:
             )
             response.raise_for_status()
             data = response.json()
+        except requests.exceptions.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.response.text[:2000] if exc.response is not None else ""
+            except Exception:
+                body = ""
+            log.error("direct analyzer request failed: %s body=%s", exc, body, exc_info=True)
+            return None, body
         except Exception as exc:
             log.error("direct analyzer request failed: %s", exc, exc_info=True)
-            return None
+            return None, str(exc)
 
         try:
-            return data["choices"][0]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"].strip(), ""
         except (KeyError, IndexError, TypeError):
             log.error("unexpected direct analyzer response: %s", json.dumps(data)[:1000])
-            return None
+            return None, json.dumps(data)[:1000]
 
-    def _write_analyzer_log(self, analyzer_log: Path, action_num: int, prompt: str, response_text: str | None) -> None:
+    def _write_analyzer_log(
+        self,
+        analyzer_log: Path,
+        action_num: int,
+        prompt: str,
+        response_text: str | None,
+        *,
+        last_error: str = "",
+    ) -> None:
         with open(analyzer_log, "a", encoding="utf-8") as handle:
             handle.write(f"\n--- action={action_num} | {datetime.now().strftime('%H:%M:%S')} | direct ---\n")
             handle.write(f"[PROMPT]\n{prompt}\n\n")
             if response_text:
                 handle.write(f"[ASSISTANT]\n{response_text}\n\n")
             else:
-                handle.write("[ERROR]\nNo response returned.\n\n")
+                handle.write(f"[ERROR]\n{last_error or 'No response returned.'}\n\n")
